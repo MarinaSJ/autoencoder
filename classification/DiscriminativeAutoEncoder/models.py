@@ -1,19 +1,23 @@
 from tensorflow.keras.optimizers import Adam
-import prepdata.discriminant_methods as dm
 from tensorflow.keras.layers import Input, Dense, GaussianDropout, Dropout
 from tensorflow.keras.models import Model
 from keras.utils.np_utils import to_categorical
-import tensorflow as tf
-import os
 
+import tensorflow as tf
+
+import os
+import pickle
+
+import sklearn
 from sklearn.utils import class_weight
 
+import prepdata.discriminant_methods as dm
+from prepdata.preparing_data import *
 #from saphyra import *
-
-import pickle
 
 import numpy as np
 np.random.seed(43)
+
 
 
 # Discrimination methods
@@ -115,6 +119,22 @@ def create_classifier(input_dim=784, n_classes=10, layers=[100], weights_file=No
     if weights_file is not None:
         classifier.load_weights(weights_file, by_name=True)
     return classifier
+        
+    
+class GradientCallback(tf.keras.callbacks.Callback):
+    '''
+    Custum callback to get the Gradient per epoch from the classification training
+    '''
+    
+    def __init__(self):
+        super().__init__()
+        print('Running GradientCallback to save the Gradient values of this epoch')        
+        self.gradient_values = []
+
+    def on_epoch_end(self, epoch, logs=None):
+        # print(self.model.trainable_variables) # cada elemento da lista é uma camada da rede treinada com seus pesos
+        self.gradient_values.append(self.model.trainable_variables)
+        print('Gradient of this epoch registred')
 
 
 class DiscriminativeAutoEncoder():
@@ -138,8 +158,10 @@ class DiscriminativeAutoEncoder():
         # defines the classifier model used
         self.model_clf = create_classifier(
             input_dim=layers[-1], layers=[], denoising=False, p=p, n_classes=classes_num)
+        
         self.model_rct, self.model_ecd = create_autoencoder(
             input_dim=input_shape, layers=layers, denoising=denoising, p=p)  # defines which autoencoder model used
+        
         self.learning_rate = 0.002
         self.loss = 'mse'
         
@@ -169,13 +191,14 @@ class DiscriminativeAutoEncoder():
             print(error)
 
     def fit(self, train_x, train_y, 
-            validation_data, #(x_val, y_val)
+            validation_data:tuple, #(x_val, y_val)
             epoch = None,
-            batch_size= 128,
-            verbose = 2,
+            batch_size: int = 128,
+            verbose: int = 2,
             callbacks = None,
             class_weight = None,
-            shuffle = True,
+            shuffle: bool = True,
+            n_epochs: list = [ 600, 300, 300, 150, 150 ],
             filename = 'model'
             ):
         '''
@@ -192,6 +215,10 @@ class DiscriminativeAutoEncoder():
                                                             min_delta=0,
                                                             patience=5,
                                                             verbose=0)
+        
+        grad_callback = GradientCallback()
+        
+        clf_callbacks = [early_stopping, early_stopping_1, grad_callback]
 
 
         test_x, test_y = validation_data
@@ -203,17 +230,20 @@ class DiscriminativeAutoEncoder():
         self.compile()  # (optimizer=Adam(lr=0.0002), loss='mse')
         # self.model_ecd.compile(optimizer=Adam(lr=0.0002), loss='mse')
 
-        class_weights = class_weight.compute_class_weight('balanced',
-                                                 np.unique(train_y),
-                                                 train_y)
+        # class_weights = sklearn.utils.class_weight.compute_class_weight('balanced',
+        #                                          np.unique(train_y),
+        #                                          train_y)
+        
+        # class_weights = generate_class_weights(train_y)
+        
 
         for epoch in range(5):
             if epoch == 0:
                 new_train_x = train_x
             print('=========== Reconstruction Model Fit ===========')
             # 600 na primeira epoca [ 600, 300, 300, 150, 150 ]  |  [ 4, 4, 4, 2, 2 ]
-            hist = self.model_rct.fit(train_x, new_train_x, epochs=[600, 300, 300, 150, 150][epoch],
-                                      batch_size=128, verbose=2, callbacks=[early_stopping], class_weight=class_weights)
+            hist = self.model_rct.fit(train_x, new_train_x, epochs=n_epochs[epoch],
+                                      batch_size=128, verbose=2, callbacks=[early_stopping]) #, class_weight=class_weights)
             self.model_rct.save_weights(
                 '{path}{model}autoencoder_weights_epoch_{epoch}.h5'.format(epoch=epoch,model=filename,path=self.mdlpath))
             self.model_rct.save(
@@ -239,19 +269,38 @@ class DiscriminativeAutoEncoder():
             self.model_clf.compile(optimizer=Adam(lr=0.005, beta_1=0.9, beta_2=0.999, epsilon=1e-08, decay=0.0),
                                    loss=cross_entropy, metrics=['accuracy', "categorical_crossentropy"])
             
-            if self.n_classes == 1:
+            if self.n_classes == 1: # self.n_classes <= 2:
+
+                # class_weights = sklearn.utils.class_weight.compute_class_weight('balanced',
+                #                                          np.unique(train_y),
+                #                                          train_y)
+                
+                class_weights = generate_class_weights(train_y)
                 
                 classifer_hist = self.model_clf.fit(train_hidden, train_y, batch_size=64,  # 128 -> problem 64
                                                     epochs=150,  # 150
                                                     verbose=2,
                                                     validation_data=(test_hidden, test_y),#[test_hidden, to_categorical(test_y)],
-                                                    callbacks=[early_stopping, early_stopping_1], class_weight=class_weights)
+                                                    callbacks=clf_callbacks, class_weight=class_weights)
             else:
+                # class_weights = sklearn.utils.class_weight.compute_class_weight('balanced',
+                #                                          np.unique(train_y),
+                #                                          train_y)
+                
+                class_weights = generate_class_weights(to_categorical(train_y), one_hot_encoded=True)
+
                 classifer_hist = self.model_clf.fit(train_hidden, to_categorical(train_y), batch_size=64,  # 128 -> problem 64
                                                     epochs=150,  # 150
                                                     verbose=2,
                                                     validation_data=(test_hidden, to_categorical(test_y)),#[test_hidden, to_categorical(test_y)],
-                                                    callbacks=[early_stopping, early_stopping_1], class_weight=class_weights)
+                                                    callbacks=clf_callbacks, class_weight=class_weights)
+                
+            print('Saving fit variables')    
+                
+            saved_gradients = np.array(grad_callback.gradient_values)
+            np.save('{path}{model}saved_gradients_epoch_{epoch}.npy'.format(epoch=epoch,model=filename,path=self.mdlpath), saved_gradients)
+            print('Gradient saved check')
+                
             self.model_clf.save_weights(
                 '{path}{model}clf_autoencoder_weights_epoch_{epoch}.h5'.format(epoch=epoch,model=filename,path=self.mdlpath))
             self.model_clf.save(
