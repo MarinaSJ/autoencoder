@@ -14,11 +14,11 @@ np.random.seed(43)
 
 from prepdata.preparing_data import *
 from models import *
-import workspace.trainings.autoencoder.classification.prepdata.discriminant_methods as dm
+import prepdata.discriminant_methods as dm
 
 # 0 - 4
-ets = [1, 2, 3]
-etas = [1, 2, 3, 4]
+ets = [ 4 ]
+etas = [ 0 ]
 
 # Leblon et 4 eta 0
 
